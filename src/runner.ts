@@ -4,8 +4,8 @@ import { join } from 'node:path';
 import { PATHS, type Config } from './config.ts';
 import { loadSamples, recordSample, userPace, type UserPace } from './history.ts';
 import { shouldStart, shouldStop } from './policy.ts';
-import { ClaudeProvider } from './providers/claude.ts';
-import type { JobResult, Provider } from './providers/types.ts';
+import { CHILD_ENV, ClaudeProvider } from './providers/claude.ts';
+import type { JobResult, Provider, Usage } from './providers/types.ts';
 import { loadQueue, nextProject, updateProject, type Project, type RunRecord } from './store.ts';
 
 export function log(msg: string) {
@@ -113,7 +113,14 @@ interface RunOutcome {
   record: RunRecord;
   /** Should the tick move on to another project? */
   keepGoing: boolean;
+  /** Set when Replenish stopped the run (limits, kill switch, watchdog...). */
+  stopReason?: string;
 }
+
+/** Give an interrupted agent this long to wind down before killing it. */
+const KILL_GRACE_MS = 90_000;
+/** Stop rather than run blind after this many failed usage checks in a row. */
+const MAX_FAILED_USAGE_CHECKS = 3;
 
 async function runProject(
   p: Project,
@@ -145,28 +152,45 @@ async function runProject(
       logFile: join(PATHS.logs, p.id, `${stamp}-r${round}.jsonl`),
     });
 
-    const onSignal = () => {
-      stopReason = 'Replenish was shut down.';
+    let killTimer: NodeJS.Timeout | undefined;
+    const stopJob = (reason: string) => {
+      if (stopReason) return;
+      stopReason = reason;
+      log(`Stopping: ${reason}`);
       void job.interrupt();
+      // A hung tool can ignore the interrupt; don't let it hold the lock forever.
+      killTimer = setTimeout(() => {
+        log('The session ignored the interrupt; killing it.');
+        job.kill();
+      }, KILL_GRACE_MS);
     };
+    const onSignal = () => stopJob('Replenish was shut down.');
     process.once('SIGINT', onSignal);
     process.once('SIGTERM', onSignal);
 
+    const watchdog = setTimeout(
+      () => stopJob(`The session ran longer than ${cfg.maxRunMinutes} min (watchdog); will resume next time.`),
+      cfg.maxRunMinutes * 60_000,
+    );
+
+    let failedChecks = 0;
     const timer = setInterval(async () => {
+      if (existsSync(PATHS.stop)) return stopJob('Replenish is paused (kill switch).');
       try {
         const reason = shouldStop(await job.getUsage(), cfg, weekResetAt, new Date(), pace);
-        if (reason && !stopReason) {
-          stopReason = reason;
-          log(`Stopping: ${reason}`);
-          await job.interrupt();
-        }
+        failedChecks = 0;
+        if (reason) stopJob(reason);
       } catch (err) {
-        log(`Usage check failed: ${(err as Error).message}`);
+        failedChecks++;
+        log(`Usage check failed (${failedChecks}/${MAX_FAILED_USAGE_CHECKS}): ${(err as Error).message}`);
+        if (failedChecks >= MAX_FAILED_USAGE_CHECKS) stopJob("Couldn't read usage; stopping rather than running blind.");
       }
     }, cfg.checkIntervalSeconds * 1000);
 
     lastResult = await job.done;
     clearInterval(timer);
+    clearTimeout(watchdog);
+    clearTimeout(killTimer);
     process.off('SIGINT', onSignal);
     process.off('SIGTERM', onSignal);
 
@@ -229,7 +253,7 @@ async function runProject(
   log(`"${p.name}": ${outcome} (${reason}) Report: ${report}`);
 
   // Only move on to another project if this one ended for its own reasons, not because of limits.
-  return { record, keepGoing: !stopReason && outcome !== 'paused' };
+  return { record, keepGoing: !stopReason && outcome !== 'paused', stopReason };
 }
 
 function writeReport(
@@ -276,7 +300,41 @@ export interface TickOptions {
   projectId?: string;
 }
 
+/** Longest Replenish will wait inside a run for the 5-hour window to reset. */
+const MAX_SESSION_WAIT_MS = 90 * 60_000;
+
+/**
+ * If only the 5-hour limit is in the way (the weekly spare isn't used yet) and it resets soon,
+ * how long to wait for it. Waiting beats ending the run: the hourly check could otherwise lose
+ * up to an hour of every 5-hour window, which adds up to a lot of unused spare by the reset.
+ */
+function sessionWaitMs(usage: Usage, cfg: Config, weekResetAt: string, pace: UserPace | undefined): number | undefined {
+  const { session } = usage;
+  if (!session || session.percentUsed < cfg.stopAtPercent) return undefined;
+  if (shouldStop({ ...usage, session: undefined }, cfg, weekResetAt, new Date(), pace)) return undefined;
+  const wait = Date.parse(session.resetsAt) - Date.now() + 60_000;
+  return wait > 0 && wait <= MAX_SESSION_WAIT_MS ? wait : undefined;
+}
+
+async function sleepUnlessPaused(ms: number): Promise<boolean> {
+  const end = Date.now() + ms;
+  while (Date.now() < end) {
+    if (existsSync(PATHS.stop)) return false;
+    await new Promise((r) => setTimeout(r, Math.min(30_000, end - Date.now())));
+  }
+  return !existsSync(PATHS.stop);
+}
+
 export async function tick(cfg: Config, opts: TickOptions = {}): Promise<void> {
+  // Never let a Replenish-started session (its hooks, scripts, or the agent itself) start more runs.
+  if (process.env[CHILD_ENV]) {
+    log('Refusing to run: this was started from inside a Replenish session.');
+    return;
+  }
+  if (existsSync(PATHS.stop)) {
+    log('Replenish is paused (kill switch). Run `replenish resume` to re-enable.');
+    return;
+  }
   const provider = makeProvider(cfg);
   if (!acquireLock()) {
     log('Another Replenish run is in progress; skipping.');
@@ -299,19 +357,31 @@ export async function tick(cfg: Config, opts: TickOptions = {}): Promise<void> {
         log(opts.projectId ? `No project "${opts.projectId}".` : 'Queue is empty. Add ideas with: replenish add "..."');
         return;
       }
+      if (project.status !== 'queued' && project.status !== 'in_progress') {
+        log(`"${project.name}" is ${project.status}. Use \`replenish requeue ${project.id}\` to work on it again.`);
+        return;
+      }
       if (opts.dryRun) {
         log(`Dry run: would work on "${project.name}" (${project.id}).`);
         return;
       }
       const { keepGoing } = await runProject(project, provider, cfg, weekResetAt, usage.weekly!.percentUsed, pace);
-      if (!keepGoing || opts.projectId) return;
+      if (existsSync(PATHS.stop)) return;
 
       usage = await provider.getUsage();
       const stop = shouldStop(usage, cfg, weekResetAt, new Date(), pace);
       if (stop) {
-        log(stop);
-        return;
+        const wait = sessionWaitMs(usage, cfg, weekResetAt, pace);
+        if (wait === undefined) {
+          log(stop);
+          return;
+        }
+        log(`5-hour limit is used up but weekly spare remains; waiting ${Math.round(wait / 60_000)} min for it to reset.`);
+        if (!(await sleepUnlessPaused(wait))) return;
+        usage = await provider.getUsage();
+        continue; // resumes the same in-progress project first
       }
+      if (!keepGoing || opts.projectId) return;
     }
   } finally {
     releaseLock();

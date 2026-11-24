@@ -7,6 +7,8 @@ export const PATHS = {
   config: join(HOME, 'config.json'),
   queue: join(HOME, 'queue.json'),
   history: join(HOME, 'usage-history.jsonl'),
+  /** Kill switch: while this file exists Replenish starts nothing and stops any run. */
+  stop: join(HOME, 'STOP'),
   lock: join(HOME, 'run.lock'),
   logs: join(HOME, 'logs'),
   reports: join(HOME, 'reports'),
@@ -30,8 +32,13 @@ export interface Config {
   minLeftPercent: number;
   /** Never let weekly (or 5-hour) usage go past this %. Keeps headroom for you. */
   stopAtPercent: number;
-  /** Only run during these local hours, e.g. "22-7" for overnight. Empty = any time. */
+  /**
+   * Only run during these local hours, e.g. "22-7" for overnight. "auto" = the person's learned
+   * quiet hours. Empty = any time.
+   */
   activeHours: string;
+  /** Watchdog: force-stop a single Claude session that runs longer than this. */
+  maxRunMinutes: number;
   /** Don't start while the person is using Claude themselves. */
   skipIfUserActive: boolean;
   /** How often to re-check usage while a job runs. */
@@ -54,6 +61,7 @@ export const DEFAULTS: Config = {
   minLeftPercent: 10,
   stopAtPercent: 95,
   activeHours: '',
+  maxRunMinutes: 180,
   skipIfUserActive: true,
   checkIntervalSeconds: 60,
   projectsDir: join(homedir(), 'Replenish'),
@@ -93,8 +101,8 @@ export function coerceConfigValue(key: string, raw: string): unknown {
     permissionMode: ['auto', 'acceptEdits', 'dontAsk', 'bypassPermissions'],
   };
   if (choices[key] && !choices[key].includes(raw)) throw new Error(`${key} must be one of: ${choices[key].join(', ')}`);
-  if (key === 'activeHours' && raw !== '' && !/^\d{1,2}-\d{1,2}$/.test(raw)) {
-    throw new Error('activeHours looks like "22-7" (10pm to 7am), or "" for any time');
+  if (key === 'activeHours' && raw !== '' && raw !== 'auto' && !/^\d{1,2}-\d{1,2}$/.test(raw)) {
+    throw new Error('activeHours looks like "22-7" (10pm to 7am), "auto" (your quiet hours), or "" for any time');
   }
   return raw;
 }

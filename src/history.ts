@@ -64,17 +64,57 @@ export interface UserPace {
   observedHours: number;
   /** True when the person used Claude in the most recent interval (they're active right now). */
   activeNow: boolean;
+  /**
+   * % per hour for each local hour of the day (0-23). People use Claude at 2pm, not at 3am, so
+   * this forecasts the hours left before a reset much better than one flat average. Hours with
+   * too little data fall back to `ratePerHour`.
+   */
+  byHour: number[];
+  /** Hours of data behind each `byHour` bucket. */
+  observedByHour: number[];
 }
 
 /** Hours of observation needed before trusting the learned pace over the simple reset-window rule. */
 export const MIN_OBSERVED_HOURS = 24;
 const MAX_GAP_HOURS = 48;
+/** Data needed in an hour-of-day bucket before it overrides the flat average. */
+const MIN_BUCKET_HOURS = 3;
+
+/** Spread an interval's usage evenly across the local hours of the day it covers. */
+function spreadOverHours(fromMs: number, toMs: number, used: number, usedBy: number[], hoursBy: number[]) {
+  const total = (toMs - fromMs) / HOUR;
+  let t = fromMs;
+  while (t < toMs) {
+    const d = new Date(t);
+    const nextHour = new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1).getTime();
+    const end = Math.min(nextHour, toMs);
+    const part = (end - t) / HOUR;
+    hoursBy[d.getHours()]! += part;
+    usedBy[d.getHours()]! += (used * part) / total;
+    t = end;
+  }
+}
+
+/** Expected usage (in weekly %) between two times, from the person's hour-of-day profile. */
+export function expectedUsage(pace: UserPace, fromMs: number, toMs: number): number {
+  let sum = 0;
+  let t = fromMs;
+  while (t < toMs) {
+    const d = new Date(t);
+    const end = Math.min(new Date(d.getFullYear(), d.getMonth(), d.getDate(), d.getHours() + 1).getTime(), toMs);
+    sum += (pace.byHour[d.getHours()] ?? pace.ratePerHour) * ((end - t) / HOUR);
+    t = end;
+  }
+  return sum;
+}
 
 export function userPace(samples: Sample[], now = new Date(), lookbackDays = 14): UserPace {
   const since = now.getTime() - lookbackDays * 24 * HOUR;
   let used = 0;
   let hours = 0;
   let activeNow = false;
+  const usedBy = Array<number>(24).fill(0);
+  const hoursBy = Array<number>(24).fill(0);
 
   for (let i = 1; i < samples.length; i++) {
     const a = samples[i - 1]!;
@@ -91,6 +131,7 @@ export function userPace(samples: Sample[], now = new Date(), lookbackDays = 14)
     const delta = Math.max(0, b.weekly - a.weekly);
     used += delta;
     hours += gap;
+    spreadOverHours(ta, tb, delta, usedBy, hoursBy);
 
     // The latest interval, if recent, tells us whether the person is using Claude right now.
     if (i === samples.length - 1 && now.getTime() - tb < 2 * HOUR) {
@@ -98,5 +139,25 @@ export function userPace(samples: Sample[], now = new Date(), lookbackDays = 14)
       activeNow = delta >= 1 || sessionDelta >= 3;
     }
   }
-  return { ratePerHour: hours > 0 ? used / hours : 0, observedHours: hours, activeNow };
+  const ratePerHour = hours > 0 ? used / hours : 0;
+  const byHour = usedBy.map((u, h) => (hoursBy[h]! >= MIN_BUCKET_HOURS ? u / hoursBy[h]! : ratePerHour));
+  return { ratePerHour, observedHours: hours, activeNow, byHour, observedByHour: hoursBy };
+}
+
+/**
+ * The person's quiet hours: the longest run of consecutive hours (wrapping past midnight) where
+ * they use less than a quarter of their average. Returned as an activeHours string like "1-8".
+ */
+export function quietHours(pace: UserPace): string | undefined {
+  if (pace.observedHours < MIN_OBSERVED_HOURS) return undefined;
+  const quiet = pace.byHour.map((r, h) => pace.observedByHour[h]! >= MIN_BUCKET_HOURS && r <= pace.ratePerHour / 4);
+  if (quiet.every(Boolean) || !quiet.some(Boolean)) return undefined;
+  let best = { start: 0, len: 0 };
+  for (let start = 0; start < 24; start++) {
+    if (!quiet[start] || quiet[(start + 23) % 24]) continue; // only start at the beginning of a run
+    let len = 0;
+    while (len < 24 && quiet[(start + len) % 24]) len++;
+    if (len > best.len) best = { start, len };
+  }
+  return best.len >= 3 ? `${best.start}-${(best.start + best.len) % 24}` : undefined;
 }

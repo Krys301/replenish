@@ -13,6 +13,13 @@ import type { Job, JobOptions, JobResult, Provider, Usage, UsageWindow } from '.
 
 type Json = Record<string, any>;
 
+/**
+ * Set in every claude process Replenish starts. If anything inside that session (a hook, a
+ * script, the agent itself) tries to run Replenish again, Replenish refuses, so a run can never
+ * chain into more runs.
+ */
+export const CHILD_ENV = 'REPLENISH_CHILD';
+
 export function resolveClaude(configured?: string): string {
   if (configured) return configured;
   const names = process.platform === 'win32' ? ['claude.exe', 'claude.cmd'] : ['claude'];
@@ -42,9 +49,10 @@ class StreamSession {
     // npm installs of claude on Windows are .cmd shims, which need a shell. Our args contain no
     // quotes, so wrapping each in quotes is enough.
     const viaShell = /\.(cmd|bat)$/i.test(bin);
+    const env = { ...process.env, [CHILD_ENV]: '1' };
     this.proc = viaShell
-      ? spawn([bin, ...args].map((a) => `"${a}"`).join(' '), { cwd, shell: true, windowsHide: true })
-      : spawn(bin, args, { cwd, windowsHide: true });
+      ? spawn([bin, ...args].map((a) => `"${a}"`).join(' '), { cwd, env, shell: true, windowsHide: true })
+      : spawn(bin, args, { cwd, env, windowsHide: true });
 
     this.proc.stdout!.setEncoding('utf8').on('data', (chunk: string) => {
       log?.write(chunk);
@@ -128,6 +136,10 @@ class StreamSession {
     this.send({ type: 'user', session_id: '', parent_tool_use_id: null, message: { role: 'user', content: [{ type: 'text', text }] } });
   }
 
+  kill() {
+    this.proc.kill();
+  }
+
   async close(graceMs = 5000) {
     this.proc.stdin?.end();
     const timer = setTimeout(() => this.proc.kill(), graceMs);
@@ -175,10 +187,21 @@ export class ClaudeProvider implements Provider {
 
   startJob(job: JobOptions): Job {
     mkdirSync(dirname(job.logFile), { recursive: true });
-    const promptFile = job.logFile.replace(/\.jsonl$/, '') + '.system.md';
+    const base = job.logFile.replace(/\.jsonl$/, '');
+    const promptFile = `${base}.system.md`;
     writeFileSync(promptFile, job.systemPrompt);
+    // Hooks are switched off in unattended sessions: a user hook that itself runs `claude -p`
+    // (e.g. on SessionEnd) would otherwise fire on every round and can chain-spawn sessions.
+    const settingsFile = `${base}.settings.json`;
+    writeFileSync(settingsFile, JSON.stringify({ disableAllHooks: true }));
 
-    const args = [...STREAM_ARGS, '--permission-mode', this.opts.permissionMode, '--append-system-prompt-file', promptFile, '--name', 'replenish'];
+    const args = [
+      ...STREAM_ARGS,
+      '--permission-mode', this.opts.permissionMode,
+      '--append-system-prompt-file', promptFile,
+      '--settings', settingsFile,
+      '--name', 'replenish',
+    ];
     if (this.opts.model) args.push('--model', this.opts.model);
     if (job.resumeSessionId) args.push('--resume', job.resumeSessionId);
 
@@ -227,7 +250,11 @@ export class ClaudeProvider implements Provider {
       getUsage: async () => parseUsage(await s.request('get_usage', { skip_behaviors: true })),
       interrupt: async () => {
         interrupted = true;
-        await s.request('interrupt').catch(() => {});
+        await s.request('interrupt', {}, 15_000).catch(() => {});
+      },
+      kill: () => {
+        interrupted = true;
+        s.kill();
       },
     };
   }

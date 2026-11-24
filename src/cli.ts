@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { coerceConfigValue, loadConfig, PATHS, saveConfig, type Config } from './config.ts';
-import { loadSamples, MIN_OBSERVED_HOURS, recordSample, userPace } from './history.ts';
-import { forecast, hoursUntil, shouldStart } from './policy.ts';
+import { loadSamples, MIN_OBSERVED_HOURS, quietHours, recordSample, userPace } from './history.ts';
+import { forecast, hoursUntil, resolveActiveHours, shouldStart } from './policy.ts';
 import { makeProvider, runInProgress, tick } from './runner.ts';
 import { install, uninstall } from './schedule.ts';
 import { addProject, loadQueue, nextProject, removeProject, updateProject } from './store.ts';
@@ -17,6 +17,8 @@ Usage:
   replenish remove <id>              Delete a project from the queue
   replenish requeue <id>             Put a done/blocked/failed project back in the queue
   replenish status                   Usage, the start decision, and what's next
+  replenish analyze                  Your usage by hour of day, and your quiet hours
+  replenish pause | resume           Kill switch: stop everything now / re-enable
   replenish install | uninstall      Run automatically every hour (Task Scheduler / cron)
   replenish tick [--dry-run]         One scheduler check (what the hourly job runs)
   replenish run [<id>]               Start now, without waiting for the reset window
@@ -108,10 +110,49 @@ async function main() {
       } else {
         console.log(`Learning your pace: ${Math.floor(pace.observedHours)}h of ${MIN_OBSERVED_HOURS}h observed. Until then, the last-${cfg.windowHours}h-before-reset rule applies.`);
       }
-      if (cfg.activeHours) console.log(`Active hours: ${cfg.activeHours}`);
+      if (existsSync(PATHS.stop)) console.log('PAUSED (kill switch on). Run `replenish resume` to re-enable.');
+      if (cfg.activeHours) {
+        const active = resolveActiveHours(cfg, pace);
+        console.log(`Active hours: ${cfg.activeHours === 'auto' ? `auto (your quiet hours: ${active || 'still learning, so any time'})` : active}`);
+      }
       console.log(running ? '\nA Replenish run is in progress right now.' : `\n${shouldStart(usage, cfg, now, pace).reason}`);
       const next = nextProject(loadQueue());
       console.log(next ? `Next up: ${next.name} (${next.id})` : 'Queue is empty.');
+      return;
+    }
+
+    case 'pause':
+      writeFileSync(PATHS.stop, `Paused ${new Date().toISOString()}
+`);
+      console.log('Paused. Nothing new will start, and a running build stops at its next usage check (within a minute).');
+      console.log('Re-enable with: replenish resume');
+      return;
+
+    case 'resume':
+      rmSync(PATHS.stop, { force: true });
+      console.log('Resumed.');
+      return;
+
+    case 'analyze': {
+      const now = new Date();
+      const pace = userPace(loadSamples(now), now);
+      if (pace.observedHours === 0) return console.log('No usage history yet. It builds up from each hourly check (`replenish install`).');
+      console.log(`Your own Claude usage by hour of day (last 14 days, ${Math.round(pace.observedHours)}h observed, Replenish runs excluded):
+`);
+      const peak = Math.max(...pace.byHour, 1e-9);
+      for (let h = 0; h < 24; h++) {
+        const r = pace.byHour[h]!;
+        const thin = pace.observedByHour[h]! < 3 ? '  (little data)' : '';
+        console.log(`  ${String(h).padStart(2, '0')}:00  ${'█'.repeat(Math.round((r / peak) * 30)).padEnd(30)} ${r.toFixed(2)}%/h${thin}`);
+      }
+      console.log(`
+Average: ${(pace.ratePerHour * 24).toFixed(1)}% of your weekly limit per day.`);
+      const quiet = quietHours(pace);
+      if (quiet) {
+        console.log(`Your quiet hours: ${quiet}. To have Replenish build only then: replenish config activeHours auto`);
+      } else {
+        console.log(pace.observedHours < MIN_OBSERVED_HOURS ? `Quiet hours: need ${MIN_OBSERVED_HOURS}h of history first.` : 'No clear quiet hours yet.');
+      }
       return;
     }
 

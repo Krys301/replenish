@@ -80,12 +80,12 @@ This adds an hourly check: Task Scheduler on Windows, cron on macOS and Linux. E
 
 Replenish watches how **you** use Claude and only spends what you aren't going to use.
 
-1. **It learns your pace.** Every hourly check records your weekly usage. From the last 14 days it works out how much of the weekly limit you normally use per hour. Replenish's own runs are left out, so it never mistakes its own work for yours.
-2. **It forecasts the reset.** `your usage now + your pace × hours until reset` is where you'd end up on your own.
+1. **It learns your pace, hour by hour.** Every hourly check records your weekly usage. From the last 14 days it works out how much you normally use **at each hour of the day**. Replenish's own runs are left out, so it never mistakes its own work for yours.
+2. **It forecasts the reset.** It adds up what you usually use in each hour left before the reset. If the reset is overnight, it reserves almost nothing for those hours. A flat daily average would hold back usage you were never going to use.
 3. **It keeps a reserve for you** of what you're expected to need before the reset, times a safety margin (`safetyFactor`, 1.5×). Everything above the reserve is spare:
 
    ```
-   ceiling = stopAtPercent − (your pace × hours left × safetyFactor)
+   ceiling = stopAtPercent − (your expected usage until reset × safetyFactor)
    ```
 
 4. **It builds with the spare.** If the spare is at least `minLeftPercent` (10%), Replenish starts the next project and stops when usage reaches the ceiling. The reserve shrinks as the reset gets closer, so the ceiling rises, reaching `stopAtPercent` (95%) at the reset.
@@ -101,11 +101,23 @@ Forecast   ~15% used by reset if Replenish does nothing
 Spare now  77% (Replenish may go up to 86% now, rising to 95% at reset)
 ```
 
+See your own pattern with `replenish analyze`:
+
+```
+  12:00  █████████████████              0.25%/h
+  14:00  ██████████████████████████████ 0.45%/h
+  17:00                                 0.00%/h
+Average: 2.2% of your weekly limit per day.
+Your quiet hours: 17-9. To have Replenish build only then: replenish config activeHours auto
+```
+
 **It also won't:**
 - start while you're using Claude yourself (`skipIfUserActive`)
-- run outside the hours you choose (`activeHours`, e.g. `22-7` for overnight only)
+- run outside the hours you choose (`activeHours`: `22-7` for overnight, or `auto` for your learned quiet hours)
 - go past `stopAtPercent` on the weekly **or** 5-hour limit
 - touch your next week: if the limit resets mid-run, it stops
+
+**It also won't waste a 5-hour window.** If the 5-hour limit runs out but weekly spare remains and the window resets within 90 minutes, Replenish waits and carries on. Without this, the hourly check would lose up to an hour of every window.
 
 **While it's learning** (the first 24 hours of history), it uses a simple rule: spend what's left in the last `windowHours` (24h) before the reset. If you always want that rule, use `replenish config strategy deadline`.
 
@@ -131,6 +143,13 @@ replenish tick --dry-run   # show what the hourly check would do
 
 `run` still stops at the usage cap.
 
+### Stop everything right now
+
+```sh
+replenish pause    # kill switch: nothing starts, and a running build stops within a minute
+replenish resume
+```
+
 ## Settings
 
 ```sh
@@ -145,7 +164,8 @@ replenish config stopAtPercent 90      # change one
 | `windowHours` | `24` | Deadline mode (and the fallback while learning): start within this many hours of the reset |
 | `minLeftPercent` | `10` | Don't start unless at least this much of the weekly limit is spare |
 | `stopAtPercent` | `95` | Never let weekly **or** 5-hour usage go past this, so you're never locked out |
-| `activeHours` | any time | Only run in these local hours, e.g. `22-7` for overnight, `9-17` for work hours |
+| `activeHours` | any time | Only run in these local hours, e.g. `22-7` for overnight, or `auto` for your learned quiet hours |
+| `maxRunMinutes` | `180` | Watchdog: force-stop a single Claude session that runs longer than this (it resumes next time) |
 | `skipIfUserActive` | `true` | Don't start while you're using Claude yourself |
 | `checkIntervalSeconds` | `60` | How often usage is re-checked during a run |
 | `model` | Claude Code default | e.g. `sonnet`, `opus`, `haiku` |
@@ -161,6 +181,22 @@ replenish config stopAtPercent 90      # change one
 - **Stopping:** usage is re-checked every minute. Replenish stops the run when it reaches the pace ceiling or your cap, when your active hours end, or when the week resets, so the new week stays yours.
 - **Resuming:** a paused project continues in the same Claude session next time, and unfinished projects come before new ones.
 - **When Claude says it's done:** it ends with `done`, `continue`, or `blocked`. A `blocked` project waits for you, and `REPLENISH.md` says why.
+
+## Safety
+
+An unattended loop that starts Claude sessions can go wrong fast. One known failure mode is a hook that starts `claude -p` and chains into hundreds of sessions, using up a whole 5-hour window. Replenish has these guards:
+
+| Guard | What it stops |
+|---|---|
+| **Kill switch:** `replenish pause` | Nothing starts, and a running build stops within a minute. `replenish resume` re-enables it. |
+| **Hooks off in builds** | Build sessions run with `disableAllHooks`, so your SessionEnd or other hooks can't fire on every round or start more sessions. |
+| **No recursion** | Every build session is marked as started by Replenish. If anything inside it runs `replenish`, Replenish refuses. |
+| **One run at a time** | A lock file. A crashed run's stale lock is detected and cleared. |
+| **Usage-aware stopping** | Live usage is checked every minute against the pace ceiling and `stopAtPercent`. |
+| **Never runs blind** | If usage can't be read 3 times in a row, the build stops. |
+| **Watchdog** | A session running longer than `maxRunMinutes` is interrupted, and killed if it ignores the interrupt. |
+| **Bounded rounds** | At most 10 rounds per run, and 3 failed runs in a row mark a project `failed`. |
+| **Sandboxed work** | Builds happen in their own folder or worktree branch. They never push, deploy, or spend money. |
 
 ## Uninstall
 

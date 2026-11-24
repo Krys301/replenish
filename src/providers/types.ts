@@ -45,6 +45,8 @@ export interface Job {
   getUsage(): Promise<Usage>;
   /** Ask the agent to stop as soon as possible. */
   interrupt(): Promise<void>;
+  /** Last resort when an interrupt is ignored: kill the process. */
+  kill(): void;
   readonly done: Promise<JobResult>;
 }
 

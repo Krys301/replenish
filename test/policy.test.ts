@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { DEFAULTS, type Config } from '../src/config.ts';
-import { userPace, type Sample } from '../src/history.ts';
-import { forecast, inActiveHours, shouldStart, shouldStop } from '../src/policy.ts';
+import { expectedUsage, quietHours, userPace, type Sample } from '../src/history.ts';
+import { forecast, inActiveHours, resolveActiveHours, shouldStart, shouldStop } from '../src/policy.ts';
 import { parseUsage } from '../src/providers/claude.ts';
 import { parseStatus } from '../src/runner.ts';
 import { nextProject, type Project } from '../src/store.ts';
@@ -113,6 +113,47 @@ test("won't compete with the person while they're active", () => {
   assert.match(d.reason, /using Claude right now/);
 });
 
+// ---------- hour-of-day profile ----------
+
+/** `days` of hourly samples for a 9-to-5 user: `perHour` % in each work hour, nothing otherwise. */
+function workdayHistory(days: number, perHour: number, end: Date): Sample[] {
+  const out: Sample[] = [];
+  let weekly = 0;
+  const start = new Date(end.getFullYear(), end.getMonth(), end.getDate() - days, end.getHours());
+  for (let t = start.getTime(); t <= end.getTime(); t += H) {
+    const h = new Date(t).getHours();
+    out.push({ t: new Date(t).toISOString(), source: 'idle', weekly, weeklyResetsAt: '2030-01-01T00:00:00Z', session: 0 });
+    if (h >= 9 && h < 17) weekly += perHour;
+  }
+  return out;
+}
+
+test("learns which hours of the day the person uses Claude", () => {
+  const end = new Date(2026, 10, 26, 23, 0);
+  const pace = userPace(workdayHistory(10, 1, end), end);
+  assert.ok(pace.byHour[12]! > 0.9 && pace.byHour[12]! < 1.1, `noon ${pace.byHour[12]}`);
+  assert.ok(pace.byHour[3]! < 0.01, `3am ${pace.byHour[3]}`);
+  assert.equal(quietHours(pace), '17-9');
+});
+
+test('forecast counts only the hours the person actually works', () => {
+  const end = new Date(2026, 10, 26, 18, 0); // 6pm, work day over
+  const pace = userPace(workdayHistory(10, 1, end), end);
+  // Next 12 hours run 6pm-6am: all quiet, so expect ~0, where a flat average would say 4%.
+  const hourly = expectedUsage(pace, end.getTime(), end.getTime() + 12 * H);
+  assert.ok(hourly < 0.1, `expected ~0, got ${hourly}`);
+  assert.ok(pace.ratePerHour * 12 > 3.5, 'the flat average would have reserved ~4%');
+});
+
+test('activeHours "auto" resolves to the learned quiet hours', () => {
+  const end = new Date(2026, 10, 26, 23, 0);
+  const pace = userPace(workdayHistory(10, 1, end), end);
+  const cfg = { ...DEFAULTS, activeHours: 'auto' };
+  assert.equal(resolveActiveHours(cfg, pace), '17-9');
+  assert.equal(resolveActiveHours(cfg, userPace([], end)), '', 'any time until it knows');
+  assert.equal(shouldStart(usage(10, 100), cfg, new Date(2026, 10, 26, 12, 0), pace).start, false);
+});
+
 // ---------- shared rules ----------
 
 test('waits for the 5-hour window', () => {
@@ -141,7 +182,7 @@ test('active hours, including overnight ranges', () => {
   assert.equal(inActiveHours('9-17', at(14)), true);
   assert.equal(inActiveHours('9-17', at(18)), false);
   const cfg = { ...deadline, activeHours: '1-2' };
-  assert.match(shouldStart(usage(40, 10), cfg, at(14)).reason, /active hours/);
+  assert.match(shouldStart(usage(40, 10), cfg, at(14)).reason, /hours Replenish runs in/);
 });
 
 // ---------- plumbing ----------

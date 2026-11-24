@@ -1,5 +1,5 @@
 import type { Config } from './config.ts';
-import { MIN_OBSERVED_HOURS, type UserPace } from './history.ts';
+import { expectedUsage, MIN_OBSERVED_HOURS, quietHours, type UserPace } from './history.ts';
 import type { Usage } from './providers/types.ts';
 
 export type Decision = { start: boolean; reason: string };
@@ -8,6 +8,15 @@ const pct = (n: number) => `${Math.round(n)}%`;
 
 export function hoursUntil(iso: string, now: Date): number {
   return (Date.parse(iso) - now.getTime()) / 3_600_000;
+}
+
+/**
+ * The hours Replenish may run in. "auto" means the person's learned quiet hours (any time until
+ * there's enough history to know them).
+ */
+export function resolveActiveHours(cfg: Config, pace?: UserPace): string {
+  if (cfg.activeHours !== 'auto') return cfg.activeHours;
+  return (pace && quietHours(pace)) ?? '';
 }
 
 /** "22-7" → true between 22:00 and 07:00 local time. Empty = any time. */
@@ -40,8 +49,8 @@ export interface Forecast {
 /** Undefined when there's not enough history yet (or the strategy is "deadline"). */
 export function forecast(usage: Usage, cfg: Config, now: Date, pace?: UserPace): Forecast | undefined {
   if (cfg.strategy !== 'pace' || !pace || pace.observedHours < MIN_OBSERVED_HOURS || !usage.weekly) return undefined;
-  const hoursLeft = Math.max(0, hoursUntil(usage.weekly.resetsAt, now));
-  const expectedNeed = pace.ratePerHour * hoursLeft;
+  // Hour-by-hour: what the person usually uses in each of the hours left before the reset.
+  const expectedNeed = expectedUsage(pace, now.getTime(), Math.max(now.getTime(), Date.parse(usage.weekly.resetsAt)));
   const ceiling = cfg.stopAtPercent - expectedNeed * cfg.safetyFactor;
   return {
     perDay: pace.ratePerHour * 24,
@@ -61,8 +70,9 @@ export function shouldStart(usage: Usage, cfg: Config, now: Date, pace?: UserPac
   if (session && session.percentUsed >= cfg.stopAtPercent) {
     return { start: false, reason: `5-hour limit is at ${pct(session.percentUsed)}; waiting for it to reset (${hoursUntil(session.resetsAt, now).toFixed(1)}h).` };
   }
-  if (!inActiveHours(cfg.activeHours, now)) {
-    return { start: false, reason: `Outside your active hours (${cfg.activeHours}).` };
+  const active = resolveActiveHours(cfg, pace);
+  if (!inActiveHours(active, now)) {
+    return { start: false, reason: `Outside the hours Replenish runs in (${active}${cfg.activeHours === 'auto' ? ', your quiet hours' : ''}).` };
   }
   if (cfg.skipIfUserActive && pace?.activeNow) {
     return { start: false, reason: "You're using Claude right now; Replenish won't compete with you." };
@@ -109,8 +119,9 @@ export function shouldStop(usage: Usage, cfg: Config, startedWeekResetAt: string
   if (f && weekly.percentUsed >= f.ceiling) {
     return `Used the spare: weekly is at ${pct(weekly.percentUsed)}, and the rest is kept for your usual ~${pct(f.perDay)}/day until the reset.`;
   }
-  if (!inActiveHours(cfg.activeHours, now)) {
-    return `Active hours (${cfg.activeHours}) ended; will continue next time.`;
+  const active = resolveActiveHours(cfg, pace);
+  if (!inActiveHours(active, now)) {
+    return `Active hours (${active}) ended; will continue next time.`;
   }
   return undefined;
 }
