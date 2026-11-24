@@ -27,6 +27,8 @@ export interface JobOptions {
   resumeSessionId?: string;
   /** Raw event log for the run. */
   logFile: string;
+  /** Called with a short description of what the agent is doing ("Editing app.js"). */
+  onActivity?: (text: string) => void;
 }
 
 export interface JobResult {

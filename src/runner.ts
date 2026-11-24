@@ -4,12 +4,13 @@ import { join } from 'node:path';
 import { PATHS, type Config } from './config.ts';
 import { loadSamples, recordSample, userPace, type UserPace } from './history.ts';
 import { shouldStart, shouldStop } from './policy.ts';
+import { printLine, Progress } from './progress.ts';
 import { CHILD_ENV, ClaudeProvider } from './providers/claude.ts';
 import type { JobResult, Provider, Usage } from './providers/types.ts';
 import { loadQueue, nextProject, updateProject, type Project, type RunRecord } from './store.ts';
 
 export function log(msg: string) {
-  console.log(`[${new Date().toISOString()}] ${msg}`);
+  printLine(`[${new Date().toISOString()}] ${msg}`);
 }
 
 export function makeProvider(cfg: Config): Provider {
@@ -142,14 +143,18 @@ async function runProject(
   let status: ReturnType<typeof parseStatus>;
   let cost = 0;
   let consecutiveErrors = 0;
+  const progress = new Progress(workDir, weeklyBefore);
+  progress.begin();
 
   for (let round = 1; round <= MAX_ROUNDS_PER_RUN && !stopReason; round++) {
+    progress.setActivity(sessionId ? 'Resuming where it left off…' : 'Starting Claude…');
     const job = provider.startJob({
       cwd: workDir,
       prompt: sessionId ? RESUME_PROMPT : firstPrompt(p),
       systemPrompt: SYSTEM_PROMPT,
       resumeSessionId: sessionId,
       logFile: join(PATHS.logs, p.id, `${stamp}-r${round}.jsonl`),
+      onActivity: (text) => progress.setActivity(text),
     });
 
     let killTimer: NodeJS.Timeout | undefined;
@@ -177,7 +182,9 @@ async function runProject(
     const timer = setInterval(async () => {
       if (existsSync(PATHS.stop)) return stopJob('Replenish is paused (kill switch).');
       try {
-        const reason = shouldStop(await job.getUsage(), cfg, weekResetAt, new Date(), pace);
+        const live = await job.getUsage();
+        progress.weeklyNow = live.weekly?.percentUsed;
+        const reason = shouldStop(live, cfg, weekResetAt, new Date(), pace);
         failedChecks = 0;
         if (reason) stopJob(reason);
       } catch (err) {
@@ -216,6 +223,7 @@ async function runProject(
     if (status === 'done' || status === 'blocked') break;
   }
 
+  progress.end();
   let outcome: RunRecord['outcome'];
   let reason: string;
   if (status === 'done') [outcome, reason] = ['done', 'Agent reports the project is built.'];
@@ -346,8 +354,17 @@ export async function tick(cfg: Config, opts: TickOptions = {}): Promise<void> {
     // A manual `run` is the person's call: it only respects the hard cap, not the pace forecast.
     const pace = opts.force ? undefined : userPace(loadSamples());
     const decision = shouldStart(usage, cfg, new Date(), pace);
-    log(decision.reason);
-    if (!decision.start && !(opts.force && usage.weekly && !shouldStop(usage, cfg, usage.weekly.resetsAt, new Date()))) return;
+    if (!decision.start) {
+      // `run` overrides the waiting rules, but never the hard limits (cap, 5-hour limit, reset).
+      const hardStop = usage.weekly ? shouldStop(usage, cfg, usage.weekly.resetsAt, new Date()) : decision.reason;
+      if (!opts.force || hardStop) {
+        log(opts.force ? `Can't start: ${hardStop}` : decision.reason);
+        return;
+      }
+      log(`Starting now because you ran \`replenish run\`. (Left alone, Replenish would wait: ${decision.reason})`);
+    } else {
+      log(decision.reason);
+    }
 
     const weekResetAt = usage.weekly!.resetsAt;
     for (;;) {

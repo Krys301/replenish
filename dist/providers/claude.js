@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { delimiter, dirname, join } from 'node:path';
+import { basename, delimiter, dirname, join } from 'node:path';
 /**
  * Set in every claude process Replenish starts. If anything inside that session (a hook, a
  * script, the agent itself) tries to run Replenish again, Replenish refuses, so a run can never
@@ -132,6 +132,38 @@ class StreamSession {
         clearTimeout(timer);
     }
 }
+/** Turn a Claude Code tool call into a few words for the progress line. */
+export function describeToolUse(name, input = {}) {
+    const file = typeof input.file_path === 'string' ? basename(input.file_path) : typeof input.notebook_path === 'string' ? basename(input.notebook_path) : '';
+    switch (name) {
+        case 'Edit':
+        case 'MultiEdit':
+        case 'NotebookEdit':
+            return `Editing ${file}`;
+        case 'Write':
+            return `Writing ${file}`;
+        case 'Read':
+            return `Reading ${file}`;
+        case 'Bash':
+        case 'PowerShell': {
+            const cmd = String(input.description || input.command || '').replace(/\s+/g, ' ').trim();
+            return `Running: ${cmd.length > 60 ? cmd.slice(0, 59) + '…' : cmd}`;
+        }
+        case 'Glob':
+        case 'Grep':
+            return 'Searching the code';
+        case 'WebSearch':
+        case 'WebFetch':
+            return 'Researching online';
+        case 'Agent':
+        case 'Task':
+            return 'Working with a subagent';
+        case 'TodoWrite':
+            return 'Planning';
+        default:
+            return `Using ${name}`;
+    }
+}
 const STREAM_ARGS = ['-p', '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose'];
 function toWindow(w) {
     if (!w || typeof w.utilization !== 'number' || !w.resets_at)
@@ -196,6 +228,14 @@ export class ClaudeProvider {
         s.onMessage = (msg) => {
             if (msg.session_id)
                 sessionId = msg.session_id;
+            if (job.onActivity && msg.type === 'assistant' && !msg.parent_tool_use_id && Array.isArray(msg.message?.content)) {
+                for (const block of msg.message.content) {
+                    if (block.type === 'tool_use')
+                        job.onActivity(describeToolUse(block.name, block.input));
+                    else if (block.type === 'text' && block.text?.trim())
+                        job.onActivity('Thinking…');
+                }
+            }
             if (msg.type === 'result') {
                 result = msg;
                 finish();

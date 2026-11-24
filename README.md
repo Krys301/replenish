@@ -143,6 +143,16 @@ replenish tick --dry-run   # show what the hourly check would do
 
 `run` still stops at the usage cap.
 
+While it builds, you get a live progress line, plus a ✓ line for every commit:
+
+```
+  ✓ Add REPLENISH.md with project plan
+  ✓ Add temp.js CLI for Celsius/Fahrenheit conversion
+[/] 1m 10s · 3 commits · weekly 11% → 12% · Running: Run the test suite via npm test
+```
+
+The terminal is busy until the build finishes. You can't type into it, because Claude works on its own. Press **Ctrl+C** to stop: the project is kept and resumes next time.
+
 ### Stop everything right now
 
 ```sh
