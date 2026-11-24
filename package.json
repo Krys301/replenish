@@ -1,0 +1,27 @@
+{
+  "name": "replenish",
+  "version": "0.1.0",
+  "description": "Spend your leftover AI plan usage on the projects you never got around to building.",
+  "type": "module",
+  "bin": {
+    "replenish": "dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "prepare": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dev": "node src/cli.ts",
+    "test": "node --test \"test/**/*.test.ts\""
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  }
+}
