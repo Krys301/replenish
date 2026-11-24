@@ -223,7 +223,7 @@ test('finishes in-progress work before starting new projects', () => {
 
 test('describes what Claude is doing for the progress line', async () => {
   const { describeToolUse } = await import('../src/providers/claude.ts');
-  assert.equal(describeToolUse('Edit', { file_path: 'C:\proj\src\app.js' }), 'Editing app.js');
+  assert.equal(describeToolUse('Edit', { file_path: String.raw`C:\proj\src\app.js` }), 'Editing app.js');
   assert.equal(describeToolUse('Write', { file_path: '/p/README.md' }), 'Writing README.md');
   assert.equal(describeToolUse('Bash', { command: 'npm test', description: 'Run the tests' }), 'Running: Run the tests');
   assert.equal(describeToolUse('Grep', { pattern: 'x' }), 'Searching the code');
