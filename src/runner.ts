@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { PATHS, type Config } from './config.ts';
 import { loadSamples, recordSample, userPace, type UserPace } from './history.ts';
 import { shouldStart, shouldStop } from './policy.ts';
+import { repoProblem } from './gitcheck.ts';
 import { printLine, Progress } from './progress.ts';
 import { resultSummary } from './results.ts';
 import { CHILD_ENV, ClaudeProvider } from './providers/claude.ts';
@@ -97,6 +98,8 @@ function prepareWorkDir(p: Project, cfg: Config): string {
   if (p.workDir && existsSync(p.workDir)) return p.workDir;
   const dir = join(cfg.projectsDir, p.id);
   if (p.repo) {
+    const problem = repoProblem(p.repo);
+    if (problem) throw new Error(problem);
     // Work on a separate worktree + branch so the user's checkout is never touched.
     git(p.repo, 'worktree', 'add', dir, '-b', `replenish/${p.id}`);
   } else {
@@ -133,7 +136,18 @@ async function runProject(
   pace: UserPace | undefined,
 ): Promise<RunOutcome> {
   const startedAt = new Date();
-  const workDir = prepareWorkDir(p, cfg);
+  let workDir: string;
+  try {
+    workDir = prepareWorkDir(p, cfg);
+  } catch (err) {
+    // A setup problem (bad --repo path, repo with no commits...) needs the person, not a retry.
+    const reason = `Couldn't set up the project folder: ${(err as Error).message}`;
+    const record: RunRecord = { startedAt: startedAt.toISOString(), endedAt: new Date().toISOString(), outcome: 'blocked', reason };
+    updateProject(p.id, { status: 'blocked', runs: [...p.runs, record] });
+    log(`"${p.name}" is blocked. ${reason}`);
+    log(`Fix it, then run: replenish requeue ${p.id}`);
+    return { record, keepGoing: true };
+  }
   const stamp = startedAt.toISOString().replace(/[:.]/g, '-');
   updateProject(p.id, { status: 'in_progress' });
   log(`Working on "${p.name}" in ${workDir}`);

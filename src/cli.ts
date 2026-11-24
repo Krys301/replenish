@@ -7,6 +7,7 @@ import { loadSamples, MIN_OBSERVED_HOURS, quietHours, recordSample, userPace } f
 import { forecast, hoursUntil, resolveActiveHours, shouldStart } from './policy.ts';
 import { makeProvider, runInProgress, tick } from './runner.ts';
 import { install, uninstall } from './schedule.ts';
+import { repoProblem } from './gitcheck.ts';
 import { findProject, lastMessage, openFolder, resultSummary } from './results.ts';
 import { addProject, loadQueue, nextProject, removeProject, updateProject } from './store.ts';
 
@@ -55,11 +56,14 @@ async function main() {
       if (brief.trim().length < 40) {
         console.warn('Tip: longer briefs build better projects. Say what it is, who it is for, key features, and any tech preferences.');
       }
+      const repo = values.repo ? resolve(values.repo) : undefined;
+      const problem = repo && repoProblem(repo);
+      if (problem) throw new Error(`Can't use --repo: ${problem}`);
       const p = addProject({
         brief,
         name: values.name,
         priority: values.priority ? Number(values.priority) : undefined,
-        repo: values.repo ? resolve(values.repo) : undefined,
+        repo,
       });
       console.log(`Queued "${p.name}" as ${p.id} (priority ${p.priority}).`);
       return;

@@ -221,6 +221,27 @@ test('finishes in-progress work before starting new projects', () => {
   assert.equal(nextProject(projects.slice(0, 1))?.id, 'a');
 });
 
+test('explains why a --repo folder cannot be used', async () => {
+  const { repoProblem } = await import('../src/gitcheck.ts');
+  const { mkdtempSync, rmSync, writeFileSync } = await import('node:fs');
+  const { execFileSync } = await import('node:child_process');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = mkdtempSync(join(tmpdir(), 'replenish-repo-'));
+  try {
+    assert.match(repoProblem(join(dir, 'missing'))!, /doesn't exist/);
+    assert.match(repoProblem(dir)!, /isn't a git repo/);
+    execFileSync('git', ['init', '-q'], { cwd: dir });
+    assert.match(repoProblem(dir)!, /no commits yet/);
+    writeFileSync(join(dir, 'a.txt'), 'a');
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'add', '-A'], { cwd: dir });
+    execFileSync('git', ['-c', 'user.email=t@t', '-c', 'user.name=t', 'commit', '-qm', 'init'], { cwd: dir });
+    assert.equal(repoProblem(dir), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test('finds projects by id, prefix, or "last"', async () => {
   const { findProject } = await import('../src/results.ts');
   const base = { brief: '', priority: 3, createdAt: '2026-01-01' };
