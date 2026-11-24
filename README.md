@@ -121,14 +121,37 @@ Your quiet hours: 17-9. To have Replenish build only then: replenish config acti
 
 **While it's learning** (the first 24 hours of history), it uses a simple rule: spend what's left in the last `windowHours` (24h) before the reset. If you always want that rule, use `replenish config strategy deadline`.
 
-### 4. See what it built
+### 4. Find your finished project
 
-- **Projects:** `~/Replenish/<project-id>/`. Each one is a git repo with a `REPLENISH.md` explaining what was built, the decisions Claude made, how to run it, and the next steps.
+When a build ends, Replenish tells you where the project is:
+
+```
+────────────────────────────────────────────────────────────────────────
+✅ Finished: ESP32 learning template
+   Folder:     C:\Users\you\Replenish\esp32-learning-template
+   Open it:    replenish open esp32-learning-template
+   Read first: README.md (how to use it), REPLENISH.md (what was built, decisions, next steps)
+   Report:     C:\Users\you\.replenish\reports\2026-11-24-21-03-esp32-learning-template.md
+   It's a local git repo with 2 commits. Nothing was pushed online.
+────────────────────────────────────────────────────────────────────────
+```
+
+Builds from the hourly task finish while you're away, so you can find them any time with:
+
+```sh
+replenish show                   # every built project: where it is and its status
+replenish show esp32             # one project in detail, including Claude's summary (any start of the id works)
+replenish open                   # open the most recent project in VS Code (File Explorer if VS Code isn't installed)
+replenish open esp32 --folder    # open it in File Explorer instead
+```
+
+**Where everything lives:**
+- **Projects:** `~/Replenish/<project-id>/`. Each one is its own local git repo. Replenish never pushes anything online, so publish it yourself when you're happy with it, for example with GitHub Desktop: *File → Add local repository → Publish*.
 - **Reports:** `~/.replenish/reports/`, one per run, with what changed, why it stopped, usage before and after, and the commits.
 - **Log:** `~/.replenish/replenish.log`
 
 ```sh
-replenish list        # done / in_progress / blocked
+replenish list           # done / in_progress / blocked
 replenish requeue <id>   # send a finished or blocked project back for more work
 replenish remove <id>
 ```
