@@ -226,6 +226,7 @@ Your projects in `~/Replenish` and data in `~/.replenish` are left alone. Delete
 npm install
 npm test             # runs the TypeScript tests directly with node --test
 npm run typecheck
-npm run build        # compiles to dist/ (committed: run this before committing src/ changes)
+npm run compile        # compiles to dist/ (committed: run this before committing src/ changes)
+# Don't add build/prepare/install scripts to package.json: they make `npm install -g github:...` fail.
 REPLENISH_HOME=/tmp/rh npm run dev -- status   # use a throwaway data folder
 ```
