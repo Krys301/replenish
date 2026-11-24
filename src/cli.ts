@@ -3,8 +3,9 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { coerceConfigValue, loadConfig, PATHS, saveConfig, type Config } from './config.ts';
-import { hoursUntil, shouldStart } from './policy.ts';
-import { makeProvider, tick } from './runner.ts';
+import { loadSamples, MIN_OBSERVED_HOURS, recordSample, userPace } from './history.ts';
+import { forecast, hoursUntil, shouldStart } from './policy.ts';
+import { makeProvider, runInProgress, tick } from './runner.ts';
 import { install, uninstall } from './schedule.ts';
 import { addProject, loadQueue, nextProject, removeProject, updateProject } from './store.ts';
 
@@ -21,9 +22,11 @@ Usage:
   replenish run [<id>]               Start now, without waiting for the reset window
   replenish config [<key> [<value>]] Show or change settings
 
-How it works: every hour Replenish asks Claude Code how much of your weekly limit is used.
-Within ${'`windowHours`'} of the weekly reset, if enough is left, it builds the next queued project in
-its own folder until usage hits ${'`stopAtPercent`'}, then picks up where it left off next time.
+How it works: every hour Replenish checks your Claude usage and learns your normal pace (Replenish's
+own runs excluded). When it forecasts that part of your weekly limit will go unused by the reset, it
+builds the next queued project with that spare, keeping back what you're expected to need, then picks
+up where it left off next time. Until it has a day of history, it only uses what's left in the
+last ${'`windowHours`'} before the reset.
 Data lives in ${PATHS.config.replace(/[\\/]config\.json$/, '')}.`;
 
 const bar = (pct: number, width = 20) => {
@@ -91,7 +94,22 @@ async function main() {
       if (usage.session) {
         console.log(`5-hour   ${bar(usage.session.percentUsed)} ${usage.session.percentUsed}% used, resets in ${hoursUntil(usage.session.resetsAt, now).toFixed(1)}h`);
       }
-      console.log(`\n${shouldStart(usage, cfg, now).reason}`);
+      const running = runInProgress();
+      if (!running) recordSample(usage, 'idle', now);
+      const pace = userPace(loadSamples(now), now);
+      const f = forecast(usage, cfg, now, pace);
+      console.log('');
+      if (cfg.strategy === 'deadline') {
+        console.log(`Strategy: deadline (spend what's left in the last ${cfg.windowHours}h before reset)`);
+      } else if (f) {
+        console.log(`Your pace  ~${f.perDay.toFixed(1)}% of the weekly limit per day (from ${Math.round(pace.observedHours)}h of history)`);
+        console.log(`Forecast   ~${Math.round(f.projectedAtReset)}% used by reset if Replenish does nothing`);
+        console.log(`Spare now  ${Math.max(0, f.spare).toFixed(0)}% (Replenish may go up to ${Math.max(0, f.ceiling).toFixed(0)}% now, rising to ${cfg.stopAtPercent}% at reset)`);
+      } else {
+        console.log(`Learning your pace: ${Math.floor(pace.observedHours)}h of ${MIN_OBSERVED_HOURS}h observed. Until then, the last-${cfg.windowHours}h-before-reset rule applies.`);
+      }
+      if (cfg.activeHours) console.log(`Active hours: ${cfg.activeHours}`);
+      console.log(running ? '\nA Replenish run is in progress right now.' : `\n${shouldStart(usage, cfg, now, pace).reason}`);
       const next = nextProject(loadQueue());
       console.log(next ? `Next up: ${next.name} (${next.id})` : 'Queue is empty.');
       return;

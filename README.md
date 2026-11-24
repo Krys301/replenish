@@ -74,7 +74,40 @@ replenish list
 replenish install
 ```
 
-This adds an hourly check: Task Scheduler on Windows, cron on macOS and Linux. Most hours it just looks and does nothing. When your weekly reset is less than 24 hours away and at least 10% of the limit is unused, it starts building.
+This adds an hourly check: Task Scheduler on Windows, cron on macOS and Linux. Each check records your usage, which is how Replenish learns your pace. When it forecasts that part of your limit will go unused, it starts building (see [When does it start?](#when-does-it-start)).
+
+## When does it start?
+
+Replenish watches how **you** use Claude and only spends what you aren't going to use.
+
+1. **It learns your pace.** Every hourly check records your weekly usage. From the last 14 days it works out how much of the weekly limit you normally use per hour. Replenish's own runs are left out, so it never mistakes its own work for yours.
+2. **It forecasts the reset.** `your usage now + your pace × hours until reset` is where you'd end up on your own.
+3. **It keeps a reserve for you** of what you're expected to need before the reset, times a safety margin (`safetyFactor`, 1.5×). Everything above the reserve is spare:
+
+   ```
+   ceiling = stopAtPercent − (your pace × hours left × safetyFactor)
+   ```
+
+4. **It builds with the spare.** If the spare is at least `minLeftPercent` (10%), Replenish starts the next project and stops when usage reaches the ceiling. The reserve shrinks as the reset gets closer, so the ceiling rises, reaching `stopAtPercent` (95%) at the reset.
+
+So a light user gets projects built from mid-week. A heavy user only gets the bit left over at the end, or nothing.
+
+```
+$ replenish status
+Weekly   ██░░░░░░░░░░░░░░░░░░ 9% used, resets in 63.1h
+
+Your pace  ~2.4% of the weekly limit per day (from 48h of history)
+Forecast   ~15% used by reset if Replenish does nothing
+Spare now  77% (Replenish may go up to 86% now, rising to 95% at reset)
+```
+
+**It also won't:**
+- start while you're using Claude yourself (`skipIfUserActive`)
+- run outside the hours you choose (`activeHours`, e.g. `22-7` for overnight only)
+- go past `stopAtPercent` on the weekly **or** 5-hour limit
+- touch your next week: if the limit resets mid-run, it stops
+
+**While it's learning** (the first 24 hours of history), it uses a simple rule: spend what's left in the last `windowHours` (24h) before the reset. If you always want that rule, use `replenish config strategy deadline`.
 
 ### 4. See what it built
 
@@ -107,9 +140,13 @@ replenish config stopAtPercent 90      # change one
 
 | Setting | Default | Meaning |
 |---|---|---|
-| `windowHours` | `24` | Only start within this many hours of the weekly reset |
-| `minLeftPercent` | `10` | Don't start if less than this much of the weekly limit is left |
-| `stopAtPercent` | `95` | Stop when weekly **or** 5-hour usage reaches this, so you're never locked out |
+| `strategy` | `pace` | `pace`: forecast your usage and spend the spare any time. `deadline`: only spend what's left in the last `windowHours` before the reset |
+| `safetyFactor` | `1.5` | Pace mode: keep this many times your expected remaining usage in reserve |
+| `windowHours` | `24` | Deadline mode (and the fallback while learning): start within this many hours of the reset |
+| `minLeftPercent` | `10` | Don't start unless at least this much of the weekly limit is spare |
+| `stopAtPercent` | `95` | Never let weekly **or** 5-hour usage go past this, so you're never locked out |
+| `activeHours` | any time | Only run in these local hours, e.g. `22-7` for overnight, `9-17` for work hours |
+| `skipIfUserActive` | `true` | Don't start while you're using Claude yourself |
 | `checkIntervalSeconds` | `60` | How often usage is re-checked during a run |
 | `model` | Claude Code default | e.g. `sonnet`, `opus`, `haiku` |
 | `permissionMode` | `auto` | Claude Code permission mode for unattended runs |
@@ -121,7 +158,7 @@ replenish config stopAtPercent 90      # change one
 - **Usage:** Replenish asks your installed `claude` CLI for the same numbers `/usage` shows, without calling the model, so checking costs nothing.
 - **Your login:** Replenish never touches your credentials. Everything runs through your own `claude` install and account.
 - **Builds:** Claude Code runs headless in the project folder. It's told it is unattended, that it should commit after every step, and that it must never push, deploy or spend money.
-- **Stopping:** usage is re-checked every minute. Replenish stops the run at your cap, or when the week resets, so the new week's limit stays yours.
+- **Stopping:** usage is re-checked every minute. Replenish stops the run when it reaches the pace ceiling or your cap, when your active hours end, or when the week resets, so the new week stays yours.
 - **Resuming:** a paused project continues in the same Claude session next time, and unfinished projects come before new ones.
 - **When Claude says it's done:** it ends with `done`, `continue`, or `blocked`. A `blocked` project waits for you, and `REPLENISH.md` says why.
 

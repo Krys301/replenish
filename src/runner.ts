@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { PATHS, type Config } from './config.ts';
+import { loadSamples, recordSample, userPace, type UserPace } from './history.ts';
 import { shouldStart, shouldStop } from './policy.ts';
 import { ClaudeProvider } from './providers/claude.ts';
 import type { JobResult, Provider } from './providers/types.ts';
@@ -71,6 +72,15 @@ function acquireLock(): boolean {
   return false;
 }
 
+/** True while a Replenish run holds the lock (its usage would pollute an "idle" sample). */
+export function runInProgress(): boolean {
+  try {
+    return isAlive(JSON.parse(readFileSync(PATHS.lock, 'utf8')).pid);
+  } catch {
+    return false;
+  }
+}
+
 function releaseLock() {
   rmSync(PATHS.lock, { force: true });
 }
@@ -105,7 +115,14 @@ interface RunOutcome {
   keepGoing: boolean;
 }
 
-async function runProject(p: Project, provider: Provider, cfg: Config, weekResetAt: string, weeklyBefore: number): Promise<RunOutcome> {
+async function runProject(
+  p: Project,
+  provider: Provider,
+  cfg: Config,
+  weekResetAt: string,
+  weeklyBefore: number,
+  pace: UserPace | undefined,
+): Promise<RunOutcome> {
   const startedAt = new Date();
   const workDir = prepareWorkDir(p, cfg);
   const stamp = startedAt.toISOString().replace(/[:.]/g, '-');
@@ -137,7 +154,7 @@ async function runProject(p: Project, provider: Provider, cfg: Config, weekReset
 
     const timer = setInterval(async () => {
       try {
-        const reason = shouldStop(await job.getUsage(), cfg, weekResetAt);
+        const reason = shouldStop(await job.getUsage(), cfg, weekResetAt, new Date(), pace);
         if (reason && !stopReason) {
           stopReason = reason;
           log(`Stopping: ${reason}`);
@@ -188,7 +205,9 @@ async function runProject(p: Project, provider: Provider, cfg: Config, weekReset
 
   let weeklyAfter: number | undefined;
   try {
-    weeklyAfter = (await provider.getUsage()).weekly?.percentUsed;
+    const after = await provider.getUsage();
+    recordSample(after, 'run-end');
+    weeklyAfter = after.weekly?.percentUsed;
   } catch {
     /* non-fatal */
   }
@@ -265,9 +284,12 @@ export async function tick(cfg: Config, opts: TickOptions = {}): Promise<void> {
   }
   try {
     let usage = await provider.getUsage();
-    const decision = shouldStart(usage, cfg, new Date());
+    recordSample(usage, 'idle');
+    // A manual `run` is the person's call: it only respects the hard cap, not the pace forecast.
+    const pace = opts.force ? undefined : userPace(loadSamples());
+    const decision = shouldStart(usage, cfg, new Date(), pace);
     log(decision.reason);
-    if (!decision.start && !(opts.force && usage.weekly && !shouldStop(usage, cfg, usage.weekly.resetsAt))) return;
+    if (!decision.start && !(opts.force && usage.weekly && !shouldStop(usage, cfg, usage.weekly.resetsAt, new Date()))) return;
 
     const weekResetAt = usage.weekly!.resetsAt;
     for (;;) {
@@ -281,11 +303,11 @@ export async function tick(cfg: Config, opts: TickOptions = {}): Promise<void> {
         log(`Dry run: would work on "${project.name}" (${project.id}).`);
         return;
       }
-      const { keepGoing } = await runProject(project, provider, cfg, weekResetAt, usage.weekly!.percentUsed);
+      const { keepGoing } = await runProject(project, provider, cfg, weekResetAt, usage.weekly!.percentUsed, pace);
       if (!keepGoing || opts.projectId) return;
 
       usage = await provider.getUsage();
-      const stop = shouldStop(usage, cfg, weekResetAt);
+      const stop = shouldStop(usage, cfg, weekResetAt, new Date(), pace);
       if (stop) {
         log(stop);
         return;
