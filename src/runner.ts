@@ -5,6 +5,7 @@ import { PATHS, type Config } from './config.ts';
 import { loadSamples, recordSample, userPace, type UserPace } from './history.ts';
 import { shouldStart, shouldStop } from './policy.ts';
 import { printLine, Progress } from './progress.ts';
+import { resultSummary } from './results.ts';
 import { CHILD_ENV, ClaudeProvider } from './providers/claude.ts';
 import type { JobResult, Provider, Usage } from './providers/types.ts';
 import { loadQueue, nextProject, updateProject, type Project, type RunRecord } from './store.ts';
@@ -258,7 +259,9 @@ async function runProject(
   const fresh = loadQueue().find((x) => x.id === p.id) ?? p;
   const nextStatus = outcome === 'paused' ? 'in_progress' : outcome;
   updateProject(p.id, { status: nextStatus, runs: [...fresh.runs, record] });
-  log(`"${p.name}": ${outcome} (${reason}) Report: ${report}`);
+  log(`"${p.name}": ${outcome} (${reason})`);
+  // Tell the person exactly where their project is and how to open it.
+  printLine(resultSummary(loadQueue().find((x) => x.id === p.id) ?? p));
 
   // Only move on to another project if this one ended for its own reasons, not because of limits.
   return { record, keepGoing: !stopReason && outcome !== 'paused', stopReason };

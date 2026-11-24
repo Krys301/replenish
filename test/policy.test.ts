@@ -221,6 +221,21 @@ test('finishes in-progress work before starting new projects', () => {
   assert.equal(nextProject(projects.slice(0, 1))?.id, 'a');
 });
 
+test('finds projects by id, prefix, or "last"', async () => {
+  const { findProject } = await import('../src/results.ts');
+  const base = { brief: '', priority: 3, createdAt: '2026-01-01' };
+  const run = (endedAt: string) => ({ startedAt: endedAt, endedAt, outcome: 'done' as const, reason: '' });
+  const projects: Project[] = [
+    { ...base, id: 'esp32-template', name: 'a', status: 'done', runs: [run('2026-11-24T10:00:00Z')] },
+    { ...base, id: 'chore-app', name: 'b', status: 'in_progress', runs: [run('2026-11-24T12:00:00Z')] },
+    { ...base, id: 'never-run', name: 'c', status: 'queued', runs: [] },
+  ];
+  assert.equal(findProject(projects, 'chore-app')?.id, 'chore-app');
+  assert.equal(findProject(projects, 'esp')?.id, 'esp32-template');
+  assert.equal(findProject(projects, undefined)?.id, 'chore-app', 'default is the most recently run');
+  assert.equal(findProject(projects, 'nope'), undefined);
+});
+
 test('describes what Claude is doing for the progress line', async () => {
   const { describeToolUse } = await import('../src/providers/claude.ts');
   assert.equal(describeToolUse('Edit', { file_path: String.raw`C:\proj\src\app.js` }), 'Editing app.js');

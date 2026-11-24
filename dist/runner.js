@@ -5,6 +5,7 @@ import { PATHS } from './config.js';
 import { loadSamples, recordSample, userPace } from './history.js';
 import { shouldStart, shouldStop } from './policy.js';
 import { printLine, Progress } from './progress.js';
+import { resultSummary } from './results.js';
 import { CHILD_ENV, ClaudeProvider } from './providers/claude.js';
 import { loadQueue, nextProject, updateProject } from './store.js';
 export function log(msg) {
@@ -229,7 +230,9 @@ async function runProject(p, provider, cfg, weekResetAt, weeklyBefore, pace) {
     const fresh = loadQueue().find((x) => x.id === p.id) ?? p;
     const nextStatus = outcome === 'paused' ? 'in_progress' : outcome;
     updateProject(p.id, { status: nextStatus, runs: [...fresh.runs, record] });
-    log(`"${p.name}": ${outcome} (${reason}) Report: ${report}`);
+    log(`"${p.name}": ${outcome} (${reason})`);
+    // Tell the person exactly where their project is and how to open it.
+    printLine(resultSummary(loadQueue().find((x) => x.id === p.id) ?? p));
     // Only move on to another project if this one ended for its own reasons, not because of limits.
     return { record, keepGoing: !stopReason && outcome !== 'paused', stopReason };
 }

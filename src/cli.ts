@@ -7,6 +7,7 @@ import { loadSamples, MIN_OBSERVED_HOURS, quietHours, recordSample, userPace } f
 import { forecast, hoursUntil, resolveActiveHours, shouldStart } from './policy.ts';
 import { makeProvider, runInProgress, tick } from './runner.ts';
 import { install, uninstall } from './schedule.ts';
+import { findProject, lastMessage, openFolder, resultSummary } from './results.ts';
 import { addProject, loadQueue, nextProject, removeProject, updateProject } from './store.ts';
 
 const HELP = `replenish: spend leftover AI plan usage on projects you never got around to building
@@ -16,6 +17,8 @@ Usage:
   replenish list                     Show the queue
   replenish remove <id>              Delete a project from the queue
   replenish requeue <id>             Put a done/blocked/failed project back in the queue
+  replenish show [<id>]              Where your built projects are (all, or one in detail)
+  replenish open [<id>] [--folder]   Open a project in VS Code (or File Explorer). Default: the latest
   replenish status                   Usage, the start decision, and what's next
   replenish analyze                  Your usage by hour of day, and your quiet hours
   replenish pause | resume           Kill switch: stop everything now / re-enable
@@ -62,6 +65,34 @@ async function main() {
       return;
     }
 
+    case 'show': {
+      const queue = loadQueue();
+      if (rest[0]) {
+        const p = findProject(queue, rest[0]);
+        if (!p) throw new Error(`No project matching "${rest[0]}". See: replenish list`);
+        console.log(resultSummary(p));
+        const msg = lastMessage(p);
+        if (msg) console.log(`\nClaude's summary:\n\n${msg}`);
+        return;
+      }
+      const built = queue.filter((p) => p.workDir);
+      if (!built.length) return console.log('Nothing built yet. Queue an idea with: replenish add "..."');
+      console.log(`Your projects live in ${cfg.projectsDir}\n`);
+      for (const p of built) console.log(resultSummary(p) + '\n');
+      console.log('Details for one: replenish show <id>    Open one: replenish open <id>');
+      return;
+    }
+
+    case 'open': {
+      const { values, positionals } = parseArgs({ args: rest, allowPositionals: true, options: { folder: { type: 'boolean' } } });
+      const p = findProject(loadQueue(), positionals[0]);
+      if (!p) throw new Error(positionals[0] ? `No project matching "${positionals[0]}". See: replenish list` : 'Nothing has been built yet.');
+      if (!p.workDir || !existsSync(p.workDir)) throw new Error(`"${p.name}" hasn't been built yet.`);
+      const app = openFolder(p.workDir, !values.folder);
+      console.log(`Opened "${p.name}" in ${app}:\n  ${p.workDir}`);
+      return;
+    }
+
     case 'list': {
       const queue = loadQueue();
       if (!queue.length) return console.log('Queue is empty. Add one with: replenish add "<what to build>"');
@@ -70,6 +101,7 @@ async function main() {
         const last = p.runs.at(-1);
         console.log(`${p.id === next ? '→' : ' '} ${p.id.padEnd(28)} P${p.priority}  ${p.status.padEnd(11)} ${p.runs.length} run(s)${last ? `, last: ${last.outcome}` : ''}`);
       }
+      if (queue.some((p) => p.workDir)) console.log('\nWhere are they? replenish show    Open one: replenish open <id>');
       return;
     }
 
